@@ -819,8 +819,7 @@ Winback path (optional but valuable)
 
 A simulation of the CloudPage can be found here:
 
-[es-d-3423505920260326-019d20ff-c04a-78d8-8897-dd414c001c09.codepen.dev
-](https://es-d-3423505920260326-019d20ff-c04a-78d8-8897-dd414c001c09.codepen.dev/)
+#### [--- >>> Loyalty Portal Link](https://es-d-3423505920260326-019d20ff-c04a-78d8-8897-dd414c001c09.codepen.dev/)
 
 This page simulates the Loyalty Program and lets you configure the displayed content to cover different scenarios.
 
