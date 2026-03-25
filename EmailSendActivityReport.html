@@ -1,0 +1,767 @@
+<!--
+  ╔══════════════════════════════════════════════════════════════════════╗
+  ║           SECURITY NOTICE — READ BEFORE PUBLISHING                   ║
+  ╚══════════════════════════════════════════════════════════════════════╝
+
+  This page queries and renders data from Salesforce Marketing Cloud
+  (WSProxy → Send object). It is designed for internal use only.
+
+  Because it is hosted on a public CloudPage URL, anyone who discovers
+  or guesses the URL can view send activity data with no authentication.
+  Before publishing, add at least one of the protection layers below.
+
+  NOTE: code examples below are shown as plain text (delimiters removed)
+  so SFMC does not execute them. Add the appropriate %%[ ]%% or
+  <script runat="server"> wrappers when activating an option.
+
+  ──────────────────────────────────────────────────────────────────────
+  OPTION 1 — Token check
+  ──────────────────────────────────────────────────────────────────────
+  Generate a short-lived, single-use token per session and store it in
+  a Data Extension (columns: Token | ExpiresAt | SubscriberKey).
+  Validate it on every page load before rendering any content.
+
+  Wrap the following in  %%[  ]%%  to activate:
+
+    SET @token = RequestParameter("t")
+    SET @tokenRow = LookupRows("TokenDE", "Token", @token)
+    IF RowCount(@tokenRow) == 0 THEN
+      Redirect("https://www.weforum.org/")
+    ENDIF
+    SET @tokenData = Row(@tokenRow, 1)
+    IF Field(@tokenData, "ExpiresAt") < Now() THEN
+      Redirect("https://www.weforum.org/")
+    ENDIF
+
+  ──────────────────────────────────────────────────────────────────────
+  OPTION 2 — Authenticated (logged-in SFMC) users only
+  ──────────────────────────────────────────────────────────────────────
+  Use SFMC's built-in CloudPage user validation so only users with an
+  active Marketing Cloud session can load the page. Anonymous requests
+  are rejected before any page content is rendered.
+
+  Full implementation guide:
+  https://sf-marketing.com/marketing-cloud-user-validation-on-cloudpages/
+
+  ──────────────────────────────────────────────────────────────────────
+  OPTION 3 — Block direct browser access; allow only MC App context
+  ──────────────────────────────────────────────────────────────────────
+  Inspect HTTP request headers to verify the request originates from
+  inside the SFMC application (known Referer / Origin hosts). Redirect
+  any direct browser hit to the public WEF home page.
+
+  NOTE: this approach relies on HTTP headers that browsers may omit or
+  spoof. It is best combined with Option 1 or Option 2.
+
+  Wrap the following in  %%[  ]%%  to activate:
+
+    /* Block direct UI access; allow only MC App context */
+    IF @isImportRequest == "false" THEN
+      SET @ref    = Lowercase(HTTPRequestHeader("Referer"))
+      SET @origin = Lowercase(HTTPRequestHeader("Origin"))
+      SET @dest   = Lowercase(HTTPRequestHeader("Sec-Fetch-Dest"))
+      SET @employeeId = AuthenticatedEmployeeID()
+      SET @ok     = "false"
+
+      /* Known Marketing Cloud hosts */
+      IF @ok == "false" AND NOT Empty(@ref) THEN
+        IF IndexOf(@ref, ".exacttarget.com")       > 0 THEN SET @ok = "true" ENDIF
+        IF IndexOf(@ref, ".salesforce.com")         > 0 THEN SET @ok = "true" ENDIF
+        IF IndexOf(@ref, ".marketingcloudapps.com") > 0 THEN SET @ok = "true" ENDIF
+      ENDIF
+
+      /* Fallback when Referer is absent */
+      IF @ok == "false" AND NOT Empty(@origin) THEN
+        IF IndexOf(@origin, ".exacttarget.com")       > 0 THEN SET @ok = "true" ENDIF
+        IF IndexOf(@origin, ".salesforce.com")         > 0 THEN SET @ok = "true" ENDIF
+        IF IndexOf(@origin, ".marketingcloudapps.com") > 0 THEN SET @ok = "true" ENDIF
+      ENDIF
+
+      /* Fallback: authenticated employee + iframe destination */
+      IF @ok == "false" AND NOT Empty(@employeeId)
+                        AND NOT Empty(@dest)
+                        AND @dest == "iframe" THEN
+        SET @ok = "true"
+      ENDIF
+
+      /* If browser exposes a non-iframe destination, always block */
+      IF NOT Empty(@dest) AND @dest != "iframe" THEN
+        SET @ok = "false"
+      ENDIF
+
+      IF @ok == "false" THEN
+        Redirect("https://www.weforum.org/")
+      ENDIF
+    ENDIF
+
+    IF @mode == "1" THEN
+
+  ──────────────────────────────────────────────────────────────────────
+  OPTION 4 — OTP (One-Time Password) via Triggered Send + CloudPage
+  ──────────────────────────────────────────────────────────────────────
+  The user must verify their identity by entering a 4-digit code that
+  is emailed to them in real time before the page content is shown.
+  This turns the CloudPage into a two-factor gate.
+
+  Full implementation guide:
+  https://sfmarketing.cloud/2023/03/09/opt-one-time-password-flow-using-triggered-sends-and-cloudpages/
+
+  ──────────────────────────────────────────────────────────────────────
+  OPTION 5 — Hardened HTTP response headers
+  ──────────────────────────────────────────────────────────────────────
+  Add the following as a  <script runat="server">  block at the very
+  top of the page (before any HTML output) to apply security headers
+  on every response.
+
+  Reference: https://help.salesforce.com/s/articleView?id=002743057&type=1
+
+  ⚠️  IMPORTANT — X-Frame-Options: DENY prevents the page from being
+  embedded in an iframe, including inside the SFMC App itself.
+  If the page must run inside SFMC, use SAMEORIGIN instead of DENY.
+
+  Wrap the following in  <script runat="server">  </script>  to activate:
+
+    Platform.Response.SetResponseHeader(
+      "Strict-Transport-Security", "max-age=31536000; includeSubDomains");
+    Platform.Response.SetResponseHeader(
+      "X-XSS-Protection", "1; mode=block");
+    Platform.Response.SetResponseHeader(
+      "X-Frame-Options", "SAMEORIGIN");
+    Platform.Response.SetResponseHeader(
+      "X-Content-Type-Options", "nosniff");
+    Platform.Response.SetResponseHeader(
+      "Referrer-Policy", "strict-origin-when-cross-origin");
+    Platform.Response.SetResponseHeader(
+      "Content-Security-Policy", "default-src 'self'");
+
+
+  ══════════════════════════════════════════════════════════════════════
+-->
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Email Send Activity Report – World Economic Forum</title>
+  <style>
+    /* ── WEF Typeface ─────────────────────────────────────── */
+    @font-face {
+      font-family: "AkkuratLLWeb";
+      src: url("https://www.weforum.org/fonts/Akkurat/AkkuratLLWeb-Regular.woff2") format("woff2"),
+           url("https://www.weforum.org/fonts/Akkurat/AkkuratLLWeb-Regular.woff")  format("woff");
+      font-weight: normal;
+      font-style: normal;
+      font-display: swap;
+    }
+
+    /* ── WEF Design Tokens ─────────────────────────────────── */
+    :root {
+      --wef-navy:    #1B2B4B;
+      --wef-blue:    #0079C2;
+      --wef-sky:     #E6F3FB;
+      --wef-border:  #D1DAE4;
+      --wef-gray:    #F4F6F8;
+      --wef-text:    #1B2B4B;
+      --wef-muted:   #6B7A8D;
+      --wef-warning: #F59E0B;
+      --wef-error:   #DC2626;
+    }
+
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: AkkuratLLWeb, sans-serif;
+      background: var(--wef-gray);
+      color: var(--wef-text);
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+    }
+
+    /* ── Global header ─────────────────────────────────────── */
+    .wef-header {
+      background: var(--wef-navy);
+      padding: 0 40px;
+      display: flex;
+      align-items: center;
+      height: 68px;
+      gap: 16px;
+      border-bottom: 3px solid var(--wef-blue);
+    }
+
+    .wef-logo {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      text-decoration: none;
+      flex-shrink: 0;
+    }
+
+    /* WEF official logo */
+    .wef-logo svg { width: 81px; height: 50px; }
+
+    .wef-header-tag {
+      margin-left: auto;
+      color: rgba(255,255,255,.5);
+      font-size: .72rem;
+      letter-spacing: .08em;
+      text-transform: uppercase;
+      border-left: 1px solid rgba(255,255,255,.2);
+      padding-left: 20px;
+    }
+
+    /* ── Page body wrapper ─────────────────────────────────── */
+    .main {
+      flex: 1;
+      max-width: 1140px;
+      width: 100%;
+      margin: 0 auto;
+      padding: 36px 20px 60px;
+    }
+
+    /* ── Page title ────────────────────────────────────────── */
+    .page-title { margin-bottom: 28px; }
+    .page-title .accent-bar {
+      width: 44px; height: 4px;
+      background: var(--wef-blue);
+      border-radius: 2px;
+      margin-bottom: 12px;
+    }
+    .page-title h1 {
+      font-size: 1.55rem;
+      font-weight: 700;
+      color: var(--wef-navy);
+      letter-spacing: -.01em;
+    }
+    .page-title p {
+      font-size: .88rem;
+      color: var(--wef-muted);
+      margin-top: 5px;
+    }
+
+    /* ── Card ──────────────────────────────────────────────── */
+    .card {
+      background: #fff;
+      border-radius: 4px;
+      border-top: 3px solid var(--wef-blue);
+      box-shadow: 0 1px 8px rgba(27,43,75,.10);
+      margin-bottom: 24px;
+      padding: 32px 36px;
+    }
+
+    /* ── Form ──────────────────────────────────────────────── */
+    form { display: flex; flex-wrap: wrap; gap: 20px; align-items: flex-end; }
+    .form-group { display: flex; flex-direction: column; gap: 6px; }
+
+    label {
+      font-size: .72rem;
+      font-weight: 700;
+      color: var(--wef-navy);
+      text-transform: uppercase;
+      letter-spacing: .07em;
+    }
+
+    input[type="date"] {
+      border: 1.5px solid var(--wef-border);
+      border-radius: 3px;
+      padding: 10px 14px;
+      font-size: .92rem;
+      color: var(--wef-text);
+      outline: none;
+      transition: border-color .2s, box-shadow .2s;
+      min-width: 178px;
+      background: #fff;
+    }
+    input[type="date"]:focus {
+      border-color: var(--wef-blue);
+      box-shadow: 0 0 0 3px rgba(0,121,194,.14);
+    }
+
+    button[type="submit"] {
+      background: var(--wef-blue);
+      color: #fff;
+      border: none;
+      border-radius: var(--border-radius-full, 999px);
+      border-top-left-radius: 9999px;
+      border-top-right-radius: 9999px;
+      border-bottom-right-radius: 9999px;
+      border-bottom-left-radius: 9999px;
+      padding: 10px 30px;
+      font-size: .88rem;
+      font-weight: 700;
+      font-family: AkkuratLLWeb, sans-serif;
+      cursor: pointer;
+      letter-spacing: .05em;
+      text-transform: uppercase;
+      transition: background .2s;
+      white-space: nowrap;
+    }
+    button[type="submit"]:hover { background: var(--wef-navy); }
+
+    /* ── Loading overlay ───────────────────────────────────── */
+    #loadingOverlay {
+      display: none;
+      position: fixed;
+      inset: 0;
+      background: rgba(27,43,75,.60);
+      z-index: 9999;
+      align-items: center;
+      justify-content: center;
+      flex-direction: column;
+      gap: 18px;
+    }
+    #loadingOverlay.active { display: flex; }
+
+    .spinner {
+      width: 48px; height: 48px;
+      border: 4px solid rgba(255,255,255,.3);
+      border-top-color: #fff;
+      border-radius: 50%;
+      animation: spin .8s linear infinite;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+
+    .spinner-label {
+      color: #fff;
+      font-size: .85rem;
+      font-weight: 700;
+      letter-spacing: .08em;
+      text-transform: uppercase;
+    }
+
+    /* ── Messages ──────────────────────────────────────────── */
+    .msg {
+      padding: 14px 18px;
+      border-radius: 3px;
+      font-size: .9rem;
+      line-height: 1.5;
+    }
+    .msg.info    { background: var(--wef-sky);   border-left: 4px solid var(--wef-blue);    color: #064E7A; }
+    .msg.warning { background: #FFFBEB;           border-left: 4px solid var(--wef-warning); color: #78460A; }
+    .msg.error   { background: #FEF2F2;           border-left: 4px solid var(--wef-error);   color: #7F1D1D; }
+
+    /* ── Results header ────────────────────────────────────── */
+    .results-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 20px;
+    }
+    .results-header h2 {
+      font-size: 1rem;
+      font-weight: 700;
+      color: var(--wef-navy);
+    }
+    .badge {
+      background: var(--wef-blue);
+      color: #fff;
+      border-radius: 20px;
+      padding: 3px 13px;
+      font-size: .73rem;
+      font-weight: 700;
+      letter-spacing: .04em;
+    }
+
+    /* ── Table ─────────────────────────────────────────────── */
+    .table-wrapper { overflow-x: auto; }
+    table { width: 100%; border-collapse: collapse; font-size: .88rem; }
+
+    thead { background: var(--wef-navy); }
+    thead th {
+      color: #fff;
+      font-weight: 700;
+      text-align: left;
+      padding: 13px 16px;
+      font-size: .72rem;
+      text-transform: uppercase;
+      letter-spacing: .07em;
+      white-space: nowrap;
+    }
+
+    tbody tr { border-bottom: 1px solid #EEF1F5; }
+    tbody tr:last-child { border-bottom: none; }
+    tbody tr:hover { background: var(--wef-sky); }
+    tbody td { padding: 12px 16px; vertical-align: middle; }
+
+    td.send-id    { font-weight: 700; color: var(--wef-blue); font-size: .83rem; white-space: nowrap; font-family: monospace; }
+    td.send-date  { font-family: monospace; font-size: .83rem; color: var(--wef-muted); white-space: nowrap; }
+    td.email-name { font-weight: 600; }
+
+    /* ── Footer ────────────────────────────────────────────── */
+    .wef-footer {
+      background: var(--wef-navy);
+      color: rgba(255,255,255,.45);
+      text-align: center;
+      padding: 18px 20px;
+      font-size: .72rem;
+      letter-spacing: .05em;
+      margin-top: auto;
+    }
+  </style>
+</head>
+<body>
+
+<!-- Loading overlay: shown on form submit, cleared on page reload -->
+<div id="loadingOverlay">
+  <div class="spinner"></div>
+  <div class="spinner-label">Loading&hellip;</div>
+</div>
+
+<!-- ── WEF Global Header ─────────────────────────────────── -->
+<header class="wef-header">
+  <a class="wef-logo" href="#">
+    <svg width="81" height="50" viewBox="0 0 81 50" fill="none" xmlns="http://www.w3.org/2000/svg" aria-label="World Economic Forum">
+      <path fill-rule="evenodd" clip-rule="evenodd" d="M64.3361 42.3886C64.3279 42.3951 64.3197 42.4011 64.3115 42.4077L64.0939 42.1469C59.609 45.8357 53.9121 47.8309 48.0332 47.8309C41.3058 47.8309 35.0027 45.2914 30.2756 40.635C25.5485 36.0397 22.942 29.8719 22.942 23.3409C22.942 18.3223 24.4574 13.4243 27.4269 9.31223C30.3363 5.26073 34.3363 2.23738 39.0634 0.483802L38.8819 0C34.0936 1.81412 29.9728 4.89802 27.0634 9.01006C24.0332 13.2426 22.397 18.2012 22.397 23.3409C22.397 29.9924 25.0636 36.2813 29.9121 40.9977C30.368 41.4417 30.8425 41.8601 31.3252 42.2659L30.6998 42.9935C35.4876 47.045 41.6694 49.2823 48.0332 49.2823C54.2757 49.2823 60.2754 47.1055 65.0637 43.2356L64.3361 42.3886Z" fill="white"/>
+      <path fill-rule="evenodd" clip-rule="evenodd" d="M27.669 8.22347C27.5482 7.80021 27.4875 7.43749 27.4875 7.01424C27.4875 5.20011 28.6995 3.56708 30.8813 3.56708C31.3662 3.56708 31.7904 3.62762 32.1539 3.74871C32.5175 3.44654 32.9417 3.14382 33.3659 2.90219C32.6388 2.47893 31.7904 2.2373 30.8813 2.2373C28.2146 2.2373 25.9722 4.3536 25.9722 7.01424C25.9722 7.9213 26.2756 8.82836 26.6992 9.55379C26.8206 9.3727 26.942 9.19107 27.0628 9.06999C27.2448 8.76727 27.4875 8.46564 27.669 8.22347Z" fill="white"/>
+      <path fill-rule="evenodd" clip-rule="evenodd" d="M34.2154 3.50684C33.7912 3.74846 33.4277 3.99064 33.0641 4.29281C33.8519 4.8977 34.2761 5.9253 34.2761 7.01399C34.2761 8.82811 32.9428 10.4001 30.8824 10.4001C29.7305 10.4001 28.8214 9.91626 28.2157 9.13028C28.0943 9.31191 27.973 9.433 27.8516 9.61408C27.6701 9.85626 27.4886 10.0979 27.3667 10.3395C28.2764 11.1866 29.4883 11.7309 30.8824 11.7309C33.6092 11.7309 35.7915 9.67463 35.7915 7.01399C35.7915 5.62313 35.1852 4.35335 34.2154 3.50684Z" fill="white"/>
+      <path fill-rule="evenodd" clip-rule="evenodd" d="M25.5488 19.3503C25.5488 20.8017 24.7004 22.0715 23.4277 22.5553V23.3413V24.0067C25.4881 23.4624 27.0637 21.6483 27.0637 19.3503C27.0637 17.7178 26.1551 16.2664 24.8218 15.3594C24.6397 15.8432 24.5183 16.2664 24.3369 16.6897C25.1246 17.3551 25.5488 18.3227 25.5488 19.3503Z" fill="white"/>
+      <path fill-rule="evenodd" clip-rule="evenodd" d="M22.4571 22.7968H22.1542C20.0938 22.7968 18.6993 21.2249 18.6993 19.3502C18.6993 17.5967 19.9118 15.9642 22.1542 15.9642C22.6391 15.9642 23.124 16.0242 23.487 16.2058C23.6089 15.782 23.7298 15.3593 23.9118 14.936C23.3662 14.7544 22.76 14.6333 22.1542 14.6333C19.4269 14.6333 17.2451 16.7501 17.2451 19.3502C17.2451 22.0714 19.4269 24.1272 22.1542 24.1272H22.4571C22.4571 23.8855 22.3964 23.5828 22.3964 23.3412C22.3964 23.1596 22.4571 22.9785 22.4571 22.7968Z" fill="white"/>
+      <path fill-rule="evenodd" clip-rule="evenodd" d="M25.6699 28.4202C27.8516 28.4202 29.0636 30.0527 29.0636 31.8062C29.0636 33.3782 28.0944 34.769 26.579 35.1323C26.8212 35.5556 27.0639 35.9183 27.3061 36.3415C29.185 35.6766 30.579 33.9831 30.579 31.8062C30.579 29.2061 28.3365 27.0898 25.6699 27.0898C25.0035 27.0898 24.3365 27.2109 23.7915 27.4526C23.8516 27.8758 23.9123 28.3596 24.0337 28.7829C24.5186 28.5412 25.0636 28.4202 25.6699 28.4202Z" fill="white"/>
+      <path fill-rule="evenodd" clip-rule="evenodd" d="M22.2751 31.8064C22.2751 30.8993 22.5785 30.0528 23.1842 29.3879C23.0628 28.9041 22.942 28.4203 22.8813 27.9365C21.6087 28.783 20.7603 30.2344 20.7603 31.8064C20.7603 34.5281 22.942 36.5833 25.6694 36.5833C25.8509 36.5833 26.0936 36.5833 26.2756 36.5233C26.0329 36.1001 25.7301 35.6768 25.4873 35.2536C23.5483 35.1325 22.2751 33.6811 22.2751 31.8064Z" fill="white"/>
+      <path fill-rule="evenodd" clip-rule="evenodd" d="M49.4882 27.2715V32.7744C49.4882 34.0442 49.064 35.2534 47.4278 35.2534C45.7911 35.2534 45.3669 34.0442 45.3669 32.7744V27.2715H43.8521V33.0766C43.8521 35.0718 45.1247 36.5837 47.4278 36.5837C49.731 36.5837 51.0031 35.0718 51.0031 33.0766V27.2715H49.4882Z" fill="white"/>
+      <path fill-rule="evenodd" clip-rule="evenodd" d="M50.6995 10.2798H54.8208V11.5495H49.1841V2.41895H50.6995V10.2798Z" fill="white"/>
+      <path fill-rule="evenodd" clip-rule="evenodd" d="M0.0332031 14.8149H5.36655V16.1447H1.54803V18.3221H5.30586V19.6524H1.54803V22.6152H5.36655V23.9455H0.0332031V14.8149Z" fill="white"/>
+      <path fill-rule="evenodd" clip-rule="evenodd" d="M30.1543 14.3311L36.4574 20.801V14.8149H37.9723V24.3082L31.6691 17.9593V23.9455H30.1543V14.3311Z" fill="white"/>
+      <path fill-rule="evenodd" clip-rule="evenodd" d="M67.7305 14.8149H69.2458V23.9455H67.7305V14.8149Z" fill="white"/>
+      <path fill-rule="evenodd" clip-rule="evenodd" d="M14.7604 28.6018V30.7786H18.0328V32.049H14.7604V36.4021H13.2456V27.2715H18.1547V28.6018H14.7604Z" fill="white"/>
+      <path fill-rule="evenodd" clip-rule="evenodd" d="M20.8211 8.10293H20.8817L22.3359 2.41894H23.7911L21.2453 11.9128L18.033 5.07957L14.8213 11.9128L12.2153 2.41894H13.7302L15.1849 8.10293L18.033 2.2373L20.8211 8.10293Z" fill="white"/>
+      <path fill-rule="evenodd" clip-rule="evenodd" d="M55.8514 18.2615H55.7907L54.336 23.9455H52.8818L55.4271 14.4521L58.6394 21.3454L61.8517 14.4521L64.4576 23.9455H62.9423L61.4876 18.2615H61.4269L58.6394 24.1876L55.8514 18.2615Z" fill="white"/>
+      <path fill-rule="evenodd" clip-rule="evenodd" d="M56.639 30.7176L55.1843 36.4016H53.6694L56.2147 26.9077L59.4877 33.7409L62.6999 26.9077L65.2447 36.4016H63.7299L62.2752 30.7176L59.4877 36.5832L56.639 30.7176Z" fill="white"/>
+      <path fill-rule="evenodd" clip-rule="evenodd" d="M36.2761 27.2715C37.1246 27.2715 38.0944 27.2715 38.8214 27.6947C39.6097 28.118 40.0941 29.0251 40.0941 29.8716C40.0941 31.2019 39.1855 32.2906 37.8516 32.4111L40.761 36.4021H39.0642L36.3368 32.5322H35.3063V36.4021H33.7915V27.2715H36.2761ZM35.3063 31.323H35.9733C37.1852 31.323 38.6399 31.383 38.6399 29.9321C38.6399 28.4807 37.1246 28.5413 35.9126 28.5413H35.3063V31.323Z" fill="white"/>
+      <path fill-rule="evenodd" clip-rule="evenodd" d="M41.427 2.41895C42.2754 2.41895 43.2452 2.41895 43.9723 2.8422C44.7606 3.26546 45.1843 4.17252 45.1843 5.01904C45.1843 6.3499 44.3364 7.43805 42.9424 7.55859L45.9119 11.5495H44.215L41.427 7.67968H40.4572V11.5495H38.9424V2.41895H41.427ZM40.4572 6.47045H41.1242C42.3361 6.47045 43.7301 6.53099 43.7301 5.07958C43.7301 3.62818 42.2148 3.68927 41.0635 3.68927H40.4572V6.47045Z" fill="white"/>
+      <path fill-rule="evenodd" clip-rule="evenodd" d="M59.0027 10.2798H59.8511C61.8514 10.2798 63.7298 9.5538 63.7298 6.9537C63.7298 4.29306 61.8514 3.68872 59.8511 3.68872H59.0027V10.2798ZM57.4873 2.41895H59.9719C62.8813 2.41895 65.2451 3.80926 65.2451 6.9537C65.2451 10.0981 62.942 11.5495 59.9719 11.5495H57.4873V2.41895Z" fill="white"/>
+      <path fill-rule="evenodd" clip-rule="evenodd" d="M79.2456 22.3736C78.7607 22.6758 78.2152 22.7968 77.5488 22.7968C75.5485 22.7968 74.155 21.2849 74.155 19.4102C74.155 17.5967 75.367 15.9636 77.5488 15.9636C78.2152 15.9636 78.7607 16.0847 79.2456 16.3263L79.9727 15.2382C79.3063 14.8755 78.4579 14.6333 77.5488 14.6333C74.8821 14.6333 72.6396 16.7501 72.6396 19.4102C72.6396 22.0714 74.8821 24.1272 77.5488 24.1272C78.4579 24.1272 79.3063 23.9455 80.0334 23.5223L79.2456 22.3736Z" fill="white"/>
+      <path fill-rule="evenodd" clip-rule="evenodd" d="M14.8212 22.3736C14.3363 22.6758 13.7907 22.7968 13.185 22.7968C11.124 22.7968 9.73003 21.2849 9.73003 19.4102C9.73003 17.5967 10.942 15.9636 13.185 15.9636C13.7907 15.9636 14.3363 16.0847 14.8212 16.3263L15.609 15.2382C14.8819 14.8755 14.0329 14.6333 13.185 14.6333C10.4577 14.6333 8.27588 16.7501 8.27588 19.4102C8.27588 22.0714 10.4577 24.1272 13.185 24.1272C14.0329 24.1272 14.8819 23.9455 15.609 23.5223L14.8212 22.3736Z" fill="white"/>
+      <path fill-rule="evenodd" clip-rule="evenodd" d="M49.4269 19.4107C49.4269 17.5966 48.2149 15.9641 46.0331 15.9641C43.7907 15.9641 42.5782 17.5966 42.5782 19.4107C42.5782 21.2854 43.9722 22.7968 46.0331 22.7968C48.0329 22.7968 49.4269 21.2854 49.4269 19.4107ZM50.9423 19.4107C50.9423 22.0714 48.6993 24.1277 46.0331 24.1277C43.3058 24.1277 41.124 22.0714 41.124 19.4107C41.124 16.7501 43.3058 14.6338 46.0331 14.6338C48.6993 14.6338 50.9423 16.7501 50.9423 19.4107Z" fill="white"/>
+    </svg>
+  </a>
+  <div class="wef-header-tag">SFMC Platform</div>
+
+</header>
+
+<!-- ── Main ─────────────────────────────────────────────── -->
+<div class="main">
+
+  <div class="page-title">
+    <div class="accent-bar"></div>
+    <h1>Email Send Activity Report</h1>
+    <p>Query send activities between two dates using SSJS &amp; WSProxy</p>
+  </div>
+
+  <div class="card">
+    <!--
+      Form posts to itself. RequestParameter('PAGEURL') returns the current
+      CloudPage URL (standard SFMC AMPscript practice).
+      Field values are pre-populated via AMPscript RequestParameter(), which
+      correctly reads both GET and POST form fields in SFMC — no SSJS needed
+      for that part of the UI.
+    -->
+    <form method="POST" action="%%=RequestParameter('PAGEURL')=%%" id="searchForm">
+      <div class="form-group">
+        <label for="startDate">Start Date</label>
+        <input type="date" id="startDate" name="startDate"
+               value="%%=RequestParameter('startDate')=%%" required />
+      </div>
+      <div class="form-group">
+        <label for="endDate">End Date</label>
+        <input type="date" id="endDate" name="endDate"
+               value="%%=RequestParameter('endDate')=%%" required />
+      </div>
+      <button type="submit">Search Sends</button>
+    </form>
+  </div>
+
+  <!-- SSJS renders the results card below at server render time -->
+
+<script runat="server" language="JavaScript">
+Platform.Load("Core", "1.1.5");
+
+/*
+ * PURPOSE
+ *   Display a date-filtered table of SFMC email send
+ *   activities by querying the Send system object via
+ *   WSProxy entirely in SSJS.
+ *
+ * ARCHITECTURE - modular helper functions
+ *   errMsg(e)          Safely serialises any thrown value to
+ *                      a string. Prevents "undefined" in the
+ *                      UI regardless of what WSProxy throws.
+ *
+ *   getParam(name)     Reads POST form field first (via
+ *                      Platform.Request.GetFormField), then
+ *                      falls back to the query string.
+ *                      Strips dangerous HTML chars. Supports
+ *                      both form submission (POST) and
+ *                      bookmarkable URLs (GET).
+ *
+ *   escHtml(str)       HTML-encodes a value before writing
+ *                      it to the page, preventing XSS from
+ *                      unexpected SendObject field content.
+ *
+ *   formatDate(raw)    Normalises any SFMC date to YYYY-MM-DD
+ *                      for consistent, human-readable output.
+ *
+ *   isoToMDY(iso)      Converts YYYY-MM-DD to MM/DD/YYYY.
+ *                      WSProxy DateValue requires this format;
+ *                      the HTML5 date input supplies ISO.
+ *
+ *   buildFilter(s,e)   Returns a WSProxy SimpleFilterPart
+ *                      using the 'between' operator and a
+ *                      two-element Value array — the correct
+ *                      pattern for date-range filtering on Send.
+ *
+ *   querySends(filter) Instantiates WSProxy, binds the BU MID
+ *                      for security context, calls retrieve(),
+ *                      and pages through HasMoreRows using
+ *                      getNextBatch(). Returns a plain JS
+ *                      array of row objects.
+ *
+ *   renderMessage(m,t) Writes a styled alert banner.
+ *                      Types: info | warning | error.
+ *
+ *   renderTable(r,s,e) Writes the results card with summary
+ *                      header and a table: SendID, EmailName,
+ *                      SendDate (YYYY-MM-DD), Subject.
+ *
+ * KEY TECHNICAL DECISIONS
+ *   - WSProxy ONLY. No AMPscript for data retrieval.
+ *     No deprecated SOAP API calls.
+ *   - Platform.Request.GetFormField(name) is the correct
+ *     SFMC SSJS method for reading individual POST form
+ *     fields. GetPostData() returns the raw POST body
+ *     string and does not accept a field name argument.
+ *   - setClientId(MID) is required on public CloudPages
+ *     so WSProxy has a valid security context. Without it
+ *     SFMC throws "Unable to retrieve security descriptor".
+ *   - Date format: HTML5 input -> YYYY-MM-DD. isoToMDY()
+ *     converts to MM/DD/YYYY for the WSProxy DateValue.
+ *     formatDate() converts raw SFMC dates back to YYYY-MM-DD.
+ *   - 'between' operator with Value:[start,end] is simpler
+ *     and more reliable for date ranges on the Send object.
+ *   - Pagination uses getNextBatch('Send', requestId) —
+ *     the correct WSProxy paging API. The RequestID from
+ *     the initial retrieve() must be passed to every
+ *     subsequent batch call. getNextPage() is not a valid
+ *     WSProxy method.
+ *   - No dates are hardcoded. Both boundaries come solely
+ *     from user input at runtime.
+ * =========================================================
+ */
+
+/* 1. Safely convert any thrown value to a string */
+function errMsg(e) {
+  if (!e)                    return 'Unknown error';
+  if (typeof e === 'string') return e;
+  if (e.message)             return String(e.message);
+  try { return Stringify(e); } catch (x) { return 'Unknown error'; }
+}
+
+/* 2. Read POST form field, then fall back to query string; strip HTML chars */
+function getParam(name) {
+  try {
+    var v = Platform.Request.GetFormField(name);
+    if (!v || v === '') v = Platform.Request.GetQueryStringParameter(name);
+    return v ? String(v).replace(/[<>'"]/g, '') : '';
+  } catch (e) { return ''; }
+}
+
+/* 3. HTML-encode a value before writing it to the page (XSS prevention) */
+function escHtml(str) {
+  return String(str)
+    .replace(/&/g,  '&amp;')
+    .replace(/</g,  '&lt;')
+    .replace(/>/g,  '&gt;')
+    .replace(/"/g,  '&quot;');
+}
+
+/* 4. Normalise any date string to YYYY-MM-DD for display */
+function formatDate(raw) {
+  try {
+    if (!raw) return '';
+    var d = new Date(raw);
+    if (isNaN(d.getTime())) return String(raw);
+    var yyyy = d.getFullYear();
+    var mm   = ('0' + (d.getMonth() + 1)).slice(-2);
+    var dd   = ('0' + d.getDate()).slice(-2);
+    return yyyy + '-' + mm + '-' + dd;
+  } catch (e) { return String(raw); }
+}
+
+/* 5. Convert YYYY-MM-DD to MM/DD/YYYY for WSProxy DateValue */
+function isoToMDY(iso) {
+  var p = iso.split('-');
+  if (p.length !== 3) return iso;
+  return p[1] + '/' + p[2] + '/' + p[0];
+}
+
+/* 6. Build a WSProxy 'between' filter for SendDate */
+function buildFilter(startDate, endDate) {
+  return {
+    Property:       'SendDate',
+    SimpleOperator: 'between',
+    Value: [isoToMDY(startDate), isoToMDY(endDate)]
+  };
+}
+
+/* 7. Retrieve Send records via WSProxy with correct paging via getNextBatch */
+function querySends(filter) {
+  var prox = new Script.Util.WSProxy();
+
+  /* Bind BU MID - required for security context on public CloudPages */
+  var mid = Platform.Function.AuthenticatedMemberID();
+  prox.setClientId({ 'ID': mid });
+
+  var cols      = ['ID', 'EmailName', 'SendDate', 'Subject'];
+  var rows      = [];
+  var result    = prox.retrieve('Send', cols, filter);
+  var requestId = result ? result.RequestID : null;
+
+  /* WSProxy signals errors via result.Status, not thrown exceptions */
+  if (!result || result.Status === 'Error') {
+    throw (result && result.message)
+      ? result.message
+      : 'WSProxy retrieve call failed.';
+  }
+
+  if (result.Results) {
+    for (var i = 0; i < result.Results.length; i++) {
+      var r = result.Results[i];
+      rows.push({
+        SendID:    r.ID        ? String(r.ID)        : '',
+        EmailName: r.EmailName ? String(r.EmailName) : '(no name)',
+        SendDate:  formatDate(r.SendDate),
+        Subject:   r.Subject   ? String(r.Subject)   : '(no subject)'
+      });
+    }
+
+    /*
+     * Page through additional result sets.
+     * getNextBatch(objectType, requestId) is the correct WSProxy paging
+     * method — getNextPage() does not exist in the SFMC WSProxy API.
+     */
+    while (result.HasMoreRows) {
+      result = prox.getNextBatch('Send', requestId);
+      if (!result || result.Status === 'Error') break;
+      if (result.Results) {
+        for (var j = 0; j < result.Results.length; j++) {
+          var s = result.Results[j];
+          rows.push({
+            SendID:    s.ID        ? String(s.ID)        : '',
+            EmailName: s.EmailName ? String(s.EmailName) : '(no name)',
+            SendDate:  formatDate(s.SendDate),
+            Subject:   s.Subject   ? String(s.Subject)   : '(no subject)'
+          });
+        }
+      }
+    }
+  }
+
+  return rows;
+}
+
+/* 8. Write a styled alert banner (info | warning | error) */
+function renderMessage(msg, type) {
+  Write('<div class="msg ' + (type || 'info') + '">' + msg + '</div>');
+}
+
+/* 9. Write the results card and HTML table */
+function renderTable(rows, startDate, endDate) {
+  Write('<div class="card">');
+  Write('<div class="results-header">');
+  Write('<h2>Results: ' + startDate + ' &ndash; ' + endDate + '</h2>');
+  Write('<span class="badge">' + rows.length
+        + ' send' + (rows.length !== 1 ? 's' : '') + '</span>');
+  Write('</div>');
+
+  if (rows.length === 0) {
+    renderMessage('No send activities found for the selected date range.', 'warning');
+    Write('</div>');
+    return;
+  }
+
+  Write('<div class="table-wrapper"><table>');
+  Write('<thead><tr>');
+  Write('<th>Send ID</th>');
+  Write('<th>Email Name</th>');
+  Write('<th>Send Date</th>');
+  Write('<th>Subject</th>');
+  Write('</tr></thead>');
+  Write('<tbody>');
+
+  for (var i = 0; i < rows.length; i++) {
+    var row = rows[i];
+    Write('<tr>');
+    Write('<td class="send-id">'    + escHtml(row.SendID)    + '</td>');
+    Write('<td class="email-name">' + escHtml(row.EmailName) + '</td>');
+    Write('<td class="send-date">'  + escHtml(row.SendDate)  + '</td>');
+    Write('<td class="subject">'    + escHtml(row.Subject)   + '</td>');
+    Write('</tr>');
+  }
+
+  Write('</tbody></table></div>');
+  Write('</div>');
+}
+
+/* ── MAIN ── read params, validate, query, render ──────── */
+try {
+  var startDate = getParam('startDate');
+  var endDate   = getParam('endDate');
+
+  if (!startDate && !endDate) {
+    /* Initial page load — no dates submitted yet */
+    Write('<div class="card">');
+    renderMessage(
+      'Select a <strong>start date</strong> and <strong>end date</strong> above, '
+      + 'then click <strong>Search Sends</strong> to retrieve email send activities.',
+      'info'
+    );
+    Write('</div>');
+
+  } else if (!startDate || !endDate) {
+    /* Only one date supplied */
+    Write('<div class="card">');
+    renderMessage(
+      'Both a start date and an end date are required. Please fill in both fields.',
+      'warning'
+    );
+    Write('</div>');
+
+  } else if (startDate > endDate) {
+    /* Start is chronologically after end */
+    Write('<div class="card">');
+    renderMessage(
+      'The start date must be on or before the end date. Please correct your selection.',
+      'warning'
+    );
+    Write('</div>');
+
+  } else {
+    /* Happy path: build filter, query WSProxy, render table */
+    var filter = buildFilter(startDate, endDate);
+    var rows   = querySends(filter);
+    renderTable(rows, startDate, endDate);
+  }
+
+} catch (ex) {
+  /* Outer catch-all: surface any runtime or WSProxy error */
+  Write('<div class="card">');
+  renderMessage('<strong>Error:</strong> ' + errMsg(ex), 'error');
+  Write('</div>');
+}
+</script>
+
+</div><!-- /.main -->
+
+<footer class="wef-footer">
+  &copy; World Economic Forum &mdash; Internal Platform Tool
+</footer>
+
+<!-- Show loading overlay on form submit; clears automatically on page reload -->
+<script>
+  document.getElementById('searchForm').addEventListener('submit', function () {
+    document.getElementById('loadingOverlay').classList.add('active');
+  });
+</script>
+
+</body>
+</html>
